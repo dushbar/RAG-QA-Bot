@@ -6,6 +6,8 @@ grounded in — and cited to — the source files. Built to be handed a new
 client's docs folder and be answering questions within minutes, not to be a
 one-off demo tied to a specific dataset.
 
+![Docs Q&A Bot — Streamlit UI with collection settings and chat](app_screenshot.png)
+
 ## Why it's built this way
 
 - **Embeddings are local and free.** Ingestion uses `sentence-transformers` on
