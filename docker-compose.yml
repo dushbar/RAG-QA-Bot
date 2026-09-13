@@ -1,0 +1,12 @@
+services:
+  rag-bot:
+    build: .
+    container_name: rag-qa-bot
+    restart: unless-stopped
+    env_file:
+      - .env                        # ANTHROPIC_API_KEY / OPENAI_API_KEY — never baked into the image
+    volumes:
+      - ./chroma_db:/app/chroma_db  # persistent vector store — survives rebuilds/restarts
+      - ./data:/app/data            # source docs (README, SQL, DAX notes) — re-index without rebuilding
+    ports:
+      - "8501:8501"                 # exposed directly — no auth in front for now
