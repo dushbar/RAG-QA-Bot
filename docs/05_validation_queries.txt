@@ -1,0 +1,137 @@
+================================================================================
+FILE: 05_validation_queries.sql
+PROJECT: Olist E-Commerce Analytics
+PURPOSE: Runnable validation/QA queries that prove the grain-control
+         logic in 03_core_controlled_grain_views.sql actually worked.
+         These are meant to be run after any rebuild of the analytics
+         views, before trusting the Power BI dashboard. Each query
+         states its expected result in a comment so a pass/fail is
+         obvious at a glance.
+================================================================================
+
+-- CHECK 1: Fact order grain
+-- Confirms vw_fact_orders has exactly one row per order_id. If the
+-- joins in that view ever fan out (e.g. because a reviews or payments
+-- source stopped being pre-aggregated to one-row-per-order), this
+-- catches it immediately.
+-- EXPECTED: duplicate_order_rows = 0
+SELECT
+    COUNT(*) AS row_count,
+    COUNT(DISTINCT order_id) AS distinct_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_order_rows
+FROM analytics.vw_fact_orders;
+
+
+
+-- CHECK 2: Fact order-item grain
+-- Confirms vw_fact_order_items has exactly one row per
+-- (order_id, order_item_id) pair — the natural key of a line item.
+-- EXPECTED: duplicate_order_item_rows = 0
+SELECT
+    COUNT(*) AS row_count,
+    COUNT(DISTINCT CONCAT(order_id, '|', order_item_id)) AS distinct_order_items,
+    COUNT(*) - COUNT(DISTINCT CONCAT(order_id, '|', order_item_id)) AS duplicate_order_item_rows
+FROM analytics.vw_fact_order_items;
+
+
+
+-- CHECK 3: One review per order
+-- Confirms the ROW_NUMBER() dedup logic in
+-- vw_one_review_per_order actually collapsed every order down to a
+-- single review row, even when an order originally had multiple
+-- review submissions in staging.
+-- EXPECTED: duplicate_review_order_rows = 0
+SELECT
+    COUNT(*) AS row_count,
+    COUNT(DISTINCT order_id) AS distinct_reviewed_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_review_order_rows
+FROM analytics.vw_one_review_per_order;
+
+
+
+-- CHECK 4: Payment reconciliation rows
+-- Confirms vw_payment_reconciliation stayed at one row per order_id
+-- despite its LEFT JOINs to the item-summary and payment-summary
+-- views (both of which are already pre-aggregated to order grain).
+-- EXPECTED: duplicate_order_rows = 0
+SELECT
+    COUNT(*) AS payment_reconciliation_rows,
+    COUNT(DISTINCT order_id) AS distinct_orders,
+    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_order_rows
+FROM analytics.vw_payment_reconciliation;
+
+
+
+-- CHECK 5: Compare staging order count with order fact count
+-- End-to-end completeness check: the order-grain fact view should
+-- carry forward exactly as many orders as exist in the raw staging
+-- table (since vw_fact_orders LEFT JOINs everything else onto
+-- staging.clean_orders, no order should be gained or dropped).
+-- EXPECTED: staging_orders = fact_orders
+SELECT
+    (SELECT COUNT(*) FROM staging.clean_orders) AS staging_orders,
+    (SELECT COUNT(*) FROM analytics.vw_fact_orders) AS fact_orders;
+
+
+-- CHECK 6: Compare staging item count with item fact count
+-- Same completeness check at item grain: vw_fact_order_items should
+-- carry forward exactly as many rows as staging.clean_order_items,
+-- since it LEFT JOINs dimension data onto the item table without
+-- changing the item table's own grain.
+-- EXPECTED: staging_order_items = fact_order_items
+SELECT
+    (SELECT COUNT(*) FROM staging.clean_order_items) AS staging_order_items,
+    (SELECT COUNT(*) FROM analytics.vw_fact_order_items) AS fact_order_items;
+
+-- CHECK 7: Payment reconciliation status summary
+-- Business-facing rollup of vw_payment_reconciliation: how many
+-- orders fall into each reconciliation_status bucket (Reconciled /
+-- Mismatch / Missing payment / Missing order items), plus the total
+-- item value, total payment value, and net difference per bucket.
+-- Useful both as a data-quality dashboard input and as a sanity check
+-- that the vast majority of orders should land in 'Reconciled'.
+SELECT
+    reconciliation_status,
+    COUNT(*) AS orders,
+    SUM(order_item_total) AS order_item_total,
+    SUM(total_payment_value) AS total_payment_value,
+    SUM(payment_minus_order_total) AS total_difference
+FROM analytics.vw_payment_reconciliation
+GROUP BY reconciliation_status
+ORDER BY orders DESC;
+
+
+-- CHECK 8: Duplication safety check — review average, order grain vs
+-- naive item grain
+-- This is the demonstration query for WHY vw_fact_order_items must
+-- never be joined directly to reviews for a review-score metric.
+--   'Order grain - correct'          -> averages review_score once
+--                                        per order, using
+--                                        vw_fact_orders directly.
+--   'Item grain - naive / duplicated' -> joins the deduplicated review
+--                                        view onto item-grain rows,
+--                                        so any order with N items
+--                                        counts its single review N
+--                                        times in the average.
+-- The two averages differing (even slightly) is the proof that
+-- item-level duplication biases review KPIs — multi-item orders get
+-- over-weighted in the naive version. This is why every review-score
+-- metric elsewhere in the project (vw_monthly_kpis,
+-- vw_state_logistics_risk, vw_category_performance,
+-- vw_seller_performance, vw_customer_orders) is computed from
+-- order-grain sources, never item-grain ones.
+SELECT
+    'Order grain - correct' AS method,
+    AVG(CAST(review_score AS DECIMAL(10,4))) AS avg_review_score
+FROM analytics.vw_fact_orders
+WHERE review_score IS NOT NULL
+
+UNION ALL
+
+SELECT
+    'Item grain - naive / duplicated' AS method,
+    AVG(CAST(r.review_score AS DECIMAL(10,4))) AS avg_review_score
+FROM analytics.vw_fact_order_items oi
+LEFT JOIN analytics.vw_one_review_per_order r
+    ON oi.order_id = r.order_id
+WHERE r.review_score IS NOT NULL;

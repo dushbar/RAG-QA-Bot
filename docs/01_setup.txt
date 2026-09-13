@@ -1,0 +1,94 @@
+================================================================================
+FILE: 01_setup.sql
+PROJECT: Olist E-Commerce Analytics
+PURPOSE: Initial database setup — creates the database, the two-schema
+         structure (staging vs analytics), and performance indexes on the
+         staging tables that every downstream view joins against.
+================================================================================
+
+-- Create the dedicated database for this project. Keeping the Olist
+-- analytics work in its own database isolates it from other projects
+-- on the same SQL Server instance.
+CREATE DATABASE OlistAnalytics;
+GO
+
+USE OlistAnalytics;
+GO
+
+-- STAGING SCHEMA
+-- Holds the "clean_*" tables: raw Olist CSVs after basic cleaning
+-- (type casting, null handling, dedup of obvious load errors) but
+-- before any business logic is applied. Nothing in `staging` should
+-- contain calculated KPIs — it's the trusted, tidy source of truth.
+CREATE SCHEMA staging;
+GO
+
+-- ANALYTICS SCHEMA
+-- Holds all views built on top of staging: grain-controlled fact views,
+-- dimension views, and the business/reporting views consumed by Power BI.
+-- Separating schemas this way makes the "raw vs derived" boundary
+-- explicit and lets permissions be scoped differently later if needed.
+CREATE SCHEMA analytics;
+GO
+
+
+-- ----------------------------------------------------------------------
+-- INDEXES
+-- Every index below targets a foreign-key-style join column that the
+-- fact and dimension views in 02/03/04 rely on. Without these, the
+-- multi-way LEFT JOINs in vw_fact_orders and vw_fact_order_items would
+-- force full table scans on every refresh.
+-- ----------------------------------------------------------------------
+
+-- Orders table: order_id is the primary join key into order_items,
+-- payments, and reviews. customer_id is the join key into customers.
+CREATE INDEX IX_clean_orders_order_id
+ON staging.clean_orders(order_id);
+
+CREATE INDEX IX_clean_orders_customer_id
+ON staging.clean_orders(customer_id);
+
+-- Order items table: order_id joins back to orders/payments/reviews;
+-- product_id and seller_id join out to the product and seller dimensions.
+-- This table is the item-grain fact source, so its join columns are
+-- the ones under the most load.
+CREATE INDEX IX_clean_order_items_order_id
+ON staging.clean_order_items(order_id);
+
+CREATE INDEX IX_clean_order_items_product_id
+ON staging.clean_order_items(product_id);
+
+CREATE INDEX IX_clean_order_items_seller_id
+ON staging.clean_order_items(seller_id);
+
+-- Product dimension lookup key.
+CREATE INDEX IX_clean_products_product_id
+ON staging.clean_products(product_id);
+
+-- Customer dimension lookup keys. customer_unique_id is indexed
+-- separately because it's the key used for cohort/retention analysis
+-- (one customer_unique_id can have multiple customer_id records in
+-- Olist's schema — customer_id is really an "order-time" identity).
+CREATE INDEX IX_clean_customers_customer_id
+ON staging.clean_customers(customer_id);
+
+CREATE INDEX IX_clean_customers_customer_unique_id
+ON staging.clean_customers(customer_unique_id);
+
+-- Seller dimension lookup key.
+CREATE INDEX IX_clean_sellers_seller_id
+ON staging.clean_sellers(seller_id);
+
+-- Payments: order_id is a 1-to-many relationship (an order can be
+-- split across multiple payment rows, e.g. partial voucher + credit
+-- card), which is exactly why vw_payment_summary_order in file 03
+-- has to aggregate rather than join directly.
+CREATE INDEX IX_clean_payments_order_id
+ON staging.clean_payments(order_id);
+
+-- Reviews: also 1-to-many at the raw grain (an order can receive more
+-- than one review row over time), which is why file 03 builds
+-- vw_one_review_per_order to collapse it back to one row per order
+-- before it's safe to join into the order-grain fact view.
+CREATE INDEX IX_clean_reviews_order_id
+ON staging.clean_reviews(order_id);

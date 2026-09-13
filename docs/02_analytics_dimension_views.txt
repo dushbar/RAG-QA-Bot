@@ -1,0 +1,59 @@
+================================================================================
+FILE: 02_analytics_dimension_views.sql
+PROJECT: Olist E-Commerce Analytics
+PURPOSE: Thin "pass-through" dimension views over the staging tables.
+         These exist mainly for naming consistency (analytics.vw_dim_*)
+         and as a stable interface Power BI/downstream views can point
+         at, even though today they don't add transformation logic
+         beyond selecting the relevant columns.
+================================================================================
+
+-- CUSTOMER DIMENSION
+-- One row per customer_id (order-time identity). customer_unique_id is
+-- carried through because it's the true "person" identifier used for
+-- cross-order analysis (repeat purchase behavior, cohorts). Geography
+-- fields (zip/city/state) support the state-level logistics-risk
+-- reporting built in file 04.
+CREATE OR ALTER VIEW analytics.vw_dim_customers AS
+SELECT
+    customer_id,
+    customer_unique_id,
+    customer_zip_code_prefix,
+    customer_city,
+    customer_state
+FROM staging.clean_customers;
+GO
+
+-- PRODUCT DIMENSION
+-- One row per product_id. Includes both the original Portuguese
+-- category name and the English translation
+-- (product_category_name_english), since Power BI visuals use the
+-- English label but some validation/debugging needs the original.
+-- Physical attributes (weight/dimensions) are included for potential
+-- freight-cost or shipping-efficiency analysis.
+CREATE OR ALTER VIEW analytics.vw_dim_products AS
+SELECT
+    product_id,
+    product_category_name,
+    product_category_name_english,
+    product_name_length,
+    product_description_length,
+    product_photos_qty,
+    product_weight_g,
+    product_length_cm,
+    product_height_cm,
+    product_width_cm
+FROM staging.clean_products;
+GO
+
+-- SELLER DIMENSION
+-- One row per seller_id, with geography fields used to power the
+-- seller performance / seller risk segmentation views in file 04.
+CREATE OR ALTER VIEW analytics.vw_dim_sellers AS
+SELECT
+    seller_id,
+    seller_zip_code_prefix,
+    seller_city,
+    seller_state
+FROM staging.clean_sellers;
+GO
