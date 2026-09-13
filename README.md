@@ -8,25 +8,25 @@ one-off demo tied to a specific dataset.
 
 ## Why it's built this way
 
-- **Embeddings are local and free.** Ingestion uses `sentence-transformers`
-  on your own machine — no per-document API cost, and client documents never
-  leave the machine at ingestion time. The only thing that leaves the
-  machine is the final question + a handful of retrieved snippets, sent to
-  whichever LLM you configure.
+- **Embeddings are local and free.** Ingestion uses `sentence-transformers` on
+your own machine — no per-document API cost, and client documents never
+leave the machine at ingestion time. The only thing that leaves the
+machine is the final question + a handful of retrieved snippets, sent to
+whichever LLM you configure.
 - **No vendor lock-in on generation.** Swap between Anthropic and OpenAI with
-  one line in `.env`. Adding a third provider (Ollama, Gemini, etc.) means
-  implementing one `LLMProvider` subclass in `src/llm.py`.
+one line in `.env`. Adding a third provider (Ollama, Gemini, etc.) means
+implementing one `LLMProvider` subclass in `src/llm.py`.
 - **Re-running ingestion is cheap.** Each collection keeps a manifest of
-  file → content hash. Unchanged files are skipped automatically; only new
-  or edited files get re-embedded. Point it at a client's live docs folder
-  and re-run ingest on a schedule without re-processing everything.
+file → content hash. Unchanged files are skipped automatically; only new
+or edited files get re-embedded. Point it at a client's live docs folder
+and re-run ingest on a schedule without re-processing everything.
 - **One collection per client.** ChromaDB collections are namespaced by
-  name, so the same installation can serve multiple clients/projects — just
-  use a different `--collection` value.
+name, so the same installation can serve multiple clients/projects — just
+use a different `--collection` value.
 - **No black-box framework.** No LangChain/LlamaIndex abstraction layer —
-  every step (chunking, embedding, retrieval, prompting) is ~50 lines of
-  plain Python in `src/`, so it's easy to read, explain, and customize per
-  engagement.
+every step (chunking, embedding, retrieval, prompting) is ~50 lines of
+plain Python in `src/`, so it's easy to read, explain, and customize per
+engagement.
 
 ## Architecture
 
@@ -51,7 +51,7 @@ question ──► embeddings.py.embed_query ──┘
 
 ## Quickstart
 
-```bash
+```
 python -m venv .venv && source .venv/bin/activate   # optional but recommended
 pip install -r requirements.txt
 
@@ -76,31 +76,56 @@ once from an unrestricted machine — the `data/` folder is fully portable.
 ## Using this on an actual gig
 
 1. **Point it at their docs.** Drop the client's PDFs/Word docs/CSVs/markdown
-   into a folder and run `ingest.py --docs_dir <folder> --collection <client_name>`.
+into a folder and run `ingest.py --docs_dir <folder> --collection <client_name>`.
 2. **Pick a delivery shape.** The CLI is enough for a quick turnaround; run
-   `streamlit run app.py` (or deploy it — see below) if they want a chat UI
-   their team can use directly.
+`streamlit run app.py` (or deploy it — see below) if they want a chat UI
+their team can use directly.
 3. **Tune retrieval, not the prompt, first.** If answers feel off, the
-   usual fix is `--chunk_size`/`--chunk_overlap` or `top_k`, not a longer
-   system prompt. Smaller chunk sizes help precise fact lookups (pricing,
-   policies); larger ones help "explain this process" questions.
+usual fix is `--chunk_size`/`--chunk_overlap` or `top_k`, not a longer
+system prompt. Smaller chunk sizes help precise fact lookups (pricing,
+policies); larger ones help "explain this process" questions.
 4. **Add a loader if they use a format you don't support yet.** Extend
-   `SUPPORTED_EXTENSIONS` and add a `_load_xxx()` function in
-   `src/loaders.py` — everything downstream (chunking, embedding, storage)
-   works unchanged. HTML, JSON, Notion/Confluence exports, and email
-   archives are common asks.
+`SUPPORTED_EXTENSIONS` and add a `_load_xxx()` function in
+`src/loaders.py` — everything downstream (chunking, embedding, storage)
+works unchanged. HTML, JSON, Notion/Confluence exports, and email
+archives are common asks.
 5. **Multi-tenant by default.** Different `--collection` names keep clients'
-   data separate within the same `data/vectorstore/` folder.
+data separate within the same `data/vectorstore/` folder.
 
 ## Deployment options
 
 - **Streamlit Community Cloud** — free, fastest path to a shareable link;
-  fine for internal tools and demos.
+fine for internal tools and demos.
 - **Docker on a small VM** — wrap `streamlit run app.py` in a container for
-  anything client-facing or needing auth in front of it.
+anything client-facing. See below for the concrete setup.
 - **CLI only** — for scripted/batch use (e.g. answering a queue of support
-  tickets), skip the UI entirely and call `RAGPipeline` directly from
-  another script.
+tickets), skip the UI entirely and call `RAGPipeline` directly from
+another script.
+
+### Docker
+
+```
+cp .env.example .env          # fill in LLM_PROVIDER + the matching API key
+docker compose up --build
+```
+
+This builds a CPU-only image (no GPU dependency required just to serve
+embeddings), pre-downloads the local embedding model at build time so the
+container doesn't need Hugging Face access on first run, and serves the
+Streamlit UI on port 8501.
+
+`chroma_db/` and `data/` are mounted as volumes rather than baked into the
+image, so re-indexing a client's docs — or swapping in a new client
+entirely — doesn't require rebuilding the container.
+
+Relevant files:
+- `Dockerfile` — builds the image
+- `docker-compose.yml` — wires up the port, volumes, and `.env`
+- `.dockerignore` — keeps venvs, caches, and `.env` itself out of the build context
+
+There's no auth in front of the container — see Known limitations below.
+For an actual client-facing deploy, put a reverse proxy (Caddy, nginx) with
+basic auth in front rather than exposing port 8501 directly.
 
 ## Project layout
 
@@ -109,6 +134,9 @@ config.py            # defaults, loaded from .env
 ingest.py             # CLI: folder of docs -> vector store collection
 query.py               # CLI: ask questions (single-shot or interactive)
 app.py                  # Streamlit chat UI + drag-and-drop ingestion
+Dockerfile               # container build for the Streamlit app (CPU-only torch)
+docker-compose.yml         # local/VM run config — port, volumes, env
+.dockerignore                # keeps caches, venvs, and secrets out of the image
 src/
   loaders.py            # pdf, docx, txt, md, csv -> plain text
   chunking.py            # recursive text splitter (no external dep)
@@ -122,12 +150,13 @@ docs/sample/                    # small sample knowledge base to try immediately
 ## Known limitations / natural next steps
 
 - Retrieval is single-vector top-k similarity — no re-ranking or hybrid
-  keyword+vector search. Worth adding for larger doc sets (thousands of
-  pages) where precision matters more.
-- No auth on the Streamlit app — add a login layer before exposing it
-  outside a trusted network.
+keyword+vector search. Worth adding for larger doc sets (thousands of
+pages) where precision matters more.
+- No auth on the Streamlit app, including in the Docker deploy — add a
+login layer (or a reverse proxy with basic auth) before exposing it
+outside a trusted network.
 - No answer caching — repeated identical questions re-call the LLM. Cheap
-  to add with a hash-of-question cache if a client's usage is spiky.
+to add with a hash-of-question cache if a client's usage is spiky.
 - Chunking is generic; a client with heavily tabular or structured docs
-  (e.g. a large pricing catalog) may do better with a format-specific
-  chunking strategy instead of the default recursive splitter.
+(e.g. a large pricing catalog) may do better with a format-specific
+chunking strategy instead of the default recursive splitter.
